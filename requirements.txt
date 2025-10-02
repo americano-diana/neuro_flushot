@@ -3,6 +3,4 @@ numpy
 matplotlib
 seaborn
 jupyter
-geopandas
-folium
 plotly
