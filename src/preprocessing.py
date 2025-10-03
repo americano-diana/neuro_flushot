@@ -1,15 +1,38 @@
 import pandas as pd
 
-def impute_dataset(df: pd.DataFrame) -> pd.DataFrame:
+def fit_imputers(df_train: pd.DataFrame) -> dict:
     """
-    Apply predefined imputation rules to handle missing values.
-    Rules:
-    - Employment-related (industry, occupation): fill with 'Missing'
-    - Health insurance: fill with 'Missing'
-    - Socio-economic categorical: fill with 'Missing'
-    - Doctor recommendations (binary): fill with 0
-    - Opinion/behavioral (ordinal): median imputation
-    - Household counts: median imputation
+    Learn median values for numeric features from the training set.
+    Returns a dictionary of {column: median_value}.
+    """
+    imputers = {}
+    
+    # Opinion/behavioral features
+    opinion_behavior_cols = [
+        "h1n1_concern", "h1n1_knowledge",
+        "behavioral_antiviral_meds", "behavioral_avoidance", "behavioral_face_mask",
+        "behavioral_wash_hands", "behavioral_large_gatherings",
+        "behavioral_outside_home", "behavioral_touch_face",
+        "chronic_med_condition", "child_under_6_months", "health_worker",
+        "opinion_h1n1_vacc_effective", "opinion_h1n1_risk", "opinion_h1n1_sick_from_vacc",
+        "opinion_seas_vacc_effective", "opinion_seas_risk", "opinion_seas_sick_from_vacc"
+    ]
+    for col in opinion_behavior_cols:
+        if col in df_train.columns:
+            imputers[col] = df_train[col].median()
+    
+    # Household counts
+    for col in ["household_adults", "household_children"]:
+        if col in df_train.columns:
+            imputers[col] = df_train[col].median()
+    
+    return imputers
+
+
+def impute_dataset(df: pd.DataFrame, imputers: dict) -> pd.DataFrame:
+    """
+    Apply imputation using fixed rules.
+    For numeric features, use provided train-based imputers (median values).
     """
     df_imputed = df.copy()
 
@@ -28,30 +51,14 @@ def impute_dataset(df: pd.DataFrame) -> pd.DataFrame:
         if col in df_imputed.columns:
             df_imputed[col] = df_imputed[col].fillna("Missing")
 
-    # 4. Doctor recommendations (binary, assume missing = 0)
+    # 4. Doctor recommendations
     for col in ["doctor_recc_h1n1", "doctor_recc_seasonal"]:
         if col in df_imputed.columns:
             df_imputed[col] = df_imputed[col].fillna(0)
 
-    # 5. Opinion/behavioral features (median imputation)
-    opinion_behavior_cols = [
-        "h1n1_concern", "h1n1_knowledge",
-        "behavioral_antiviral_meds", "behavioral_avoidance", "behavioral_face_mask",
-        "behavioral_wash_hands", "behavioral_large_gatherings",
-        "behavioral_outside_home", "behavioral_touch_face",
-        "chronic_med_condition", "child_under_6_months", "health_worker",
-        "opinion_h1n1_vacc_effective", "opinion_h1n1_risk", "opinion_h1n1_sick_from_vacc",
-        "opinion_seas_vacc_effective", "opinion_seas_risk", "opinion_seas_sick_from_vacc"
-    ]
-    for col in opinion_behavior_cols:
+    # 5. Opinion/behavioral + household (use train medians)
+    for col, median_val in imputers.items():
         if col in df_imputed.columns:
-            median_val = df_imputed[col].median()
-            df_imputed[col] = df_imputed[col].fillna(median_val)
-
-    # 6. Household counts (median imputation)
-    for col in ["household_adults", "household_children"]:
-        if col in df_imputed.columns:
-            median_val = df_imputed[col].median()
             df_imputed[col] = df_imputed[col].fillna(median_val)
 
     return df_imputed
