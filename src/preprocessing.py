@@ -1,13 +1,16 @@
 import pandas as pd
+import numpy as np
+from sklearn.model_selection import KFold
+from src.mappings import AGE_MAPPING, EDUCATION_MAPPING, INCOME_MAPPING
 
+
+# ----------------------------
+# 1. IMPUTATION
+# ----------------------------
 def fit_imputers(df_train: pd.DataFrame) -> dict:
-    """
-    Learn median values for numeric features from the training set.
-    Returns a dictionary of {column: median_value}.
-    """
+    """Learn median values for numeric features from the training set."""
     imputers = {}
-    
-    # Opinion/behavioral features
+
     opinion_behavior_cols = [
         "h1n1_concern", "h1n1_knowledge",
         "behavioral_antiviral_meds", "behavioral_avoidance", "behavioral_face_mask",
@@ -17,101 +20,110 @@ def fit_imputers(df_train: pd.DataFrame) -> dict:
         "opinion_h1n1_vacc_effective", "opinion_h1n1_risk", "opinion_h1n1_sick_from_vacc",
         "opinion_seas_vacc_effective", "opinion_seas_risk", "opinion_seas_sick_from_vacc"
     ]
-    for col in opinion_behavior_cols:
+    for col in opinion_behavior_cols + ["household_adults", "household_children"]:
         if col in df_train.columns:
             imputers[col] = df_train[col].median()
-    
-    # Household counts
-    for col in ["household_adults", "household_children"]:
-        if col in df_train.columns:
-            imputers[col] = df_train[col].median()
-    
+
     return imputers
 
 
 def impute_dataset(df: pd.DataFrame, imputers: dict) -> pd.DataFrame:
-    """
-    Apply imputation using fixed rules.
-    For numeric features, use provided train-based imputers (median values).
-    """
+    """Apply imputation using fixed rules and train-based medians."""
     df_imputed = df.copy()
 
-    # 1. Employment-related
+    # Employment-related
     for col in ["employment_industry", "employment_occupation"]:
         if col in df_imputed.columns:
             df_imputed[col] = df_imputed[col].fillna("Missing")
 
-    # 2. Health insurance
+    # Health insurance
     if "health_insurance" in df_imputed.columns:
         df_imputed["health_insurance"] = df_imputed["health_insurance"].fillna("Missing")
 
-    # 3. Socio-economic categorical
+    # Socio-economic categorical
     cat_cols = ["income_poverty", "education", "marital_status", "employment_status", "rent_or_own"]
     for col in cat_cols:
         if col in df_imputed.columns:
             df_imputed[col] = df_imputed[col].fillna("Missing")
 
-    # 4. Doctor recommendations
+    # Doctor recommendations (binary → missing = 0)
     for col in ["doctor_recc_h1n1", "doctor_recc_seasonal"]:
         if col in df_imputed.columns:
             df_imputed[col] = df_imputed[col].fillna(0)
 
-    # 5. Opinion/behavioral + household (use train medians)
+    # Opinion/behavioral + household medians
     for col, median_val in imputers.items():
         if col in df_imputed.columns:
             df_imputed[col] = df_imputed[col].fillna(median_val)
 
     return df_imputed
 
-def encode_categoricals(df: pd.DataFrame) -> pd.DataFrame:
+
+# ----------------------------
+# 2. TARGET ENCODING (SAFE)
+# ----------------------------
+def target_encode(train_df, test_df, col, target, n_splits=5):
+    """KFold mean target encoding to avoid leakage."""
+    global_mean = train_df[target].mean()
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    train_encoded = np.zeros(train_df.shape[0])
+
+    for train_idx, val_idx in kf.split(train_df):
+        X_train, X_val = train_df.iloc[train_idx], train_df.iloc[val_idx]
+        means = X_train.groupby(col)[target].mean()
+        train_encoded[val_idx] = X_val[col].map(means)
+
+    train_encoded = np.where(np.isnan(train_encoded), global_mean, train_encoded)
+    means_full = train_df.groupby(col)[target].mean()
+    test_encoded = test_df[col].map(means_full).fillna(global_mean)
+
+    return train_encoded, test_encoded
+
+
+# ----------------------------
+# 3. CATEGORICAL ENCODING
+# ----------------------------
+def encode_categoricals(train_df: pd.DataFrame, test_df: pd.DataFrame, train_labels: pd.DataFrame):
     """
-    Apply categorical encodings:
-    - Ordinal encodings for age_group, education, income_poverty
-    - Label encodings for small/binary categoricals
-    - One-hot encoding for medium-cardinality categoricals
-    - Frequency encoding for high-cardinality categoricals
+    Apply all categorical encodings:
+    - Ordinal: age_group, education, income_poverty
+    - One-hot: sex, marital_status, rent_or_own, health_insurance, race, employment_status, census_msa, hhs_geo_region
+    - Target encoding (per vaccine): employment_industry, employment_occupation
     """
-    from src.mappings import (
-        AGE_MAPPING, EDUCATION_MAPPING, INCOME_MAPPING,
-        SEX_MAPPING, MARITAL_STATUS_MAPPING, RENT_OWN_MAPPING,
-        HEALTH_INSURANCE_MAPPING
-    )
-    
-    df_encoded = df.copy()
+    train_encoded = train_df.copy()
+    test_encoded = test_df.copy()
 
     # --- Ordinal mappings ---
-    if "age_group" in df_encoded.columns:
-        df_encoded["age_group"] = df_encoded["age_group"].map(AGE_MAPPING)
-
-    if "education" in df_encoded.columns:
-        df_encoded["education"] = df_encoded["education"].map(EDUCATION_MAPPING)
-
-    if "income_poverty" in df_encoded.columns:
-        df_encoded["income_poverty"] = df_encoded["income_poverty"].map(INCOME_MAPPING)
-
-    # --- Small nominal/binary mappings ---
-    if "sex" in df_encoded.columns:
-        df_encoded["sex"] = df_encoded["sex"].map(SEX_MAPPING)
-
-    if "marital_status" in df_encoded.columns:
-        df_encoded["marital_status"] = df_encoded["marital_status"].map(MARITAL_STATUS_MAPPING)
-
-    if "rent_or_own" in df_encoded.columns:
-        df_encoded["rent_or_own"] = df_encoded["rent_or_own"].map(RENT_OWN_MAPPING)
-
-    if "health_insurance" in df_encoded.columns:
-        df_encoded["health_insurance"] = df_encoded["health_insurance"].astype(str).map(HEALTH_INSURANCE_MAPPING)
+    for col, mapping in {
+        "age_group": AGE_MAPPING,
+        "education": EDUCATION_MAPPING,
+        "income_poverty": INCOME_MAPPING
+    }.items():
+        if col in train_encoded.columns:
+            train_encoded[col] = train_encoded[col].map(mapping)
+            test_encoded[col] = test_encoded[col].map(mapping)
 
     # --- One-hot encoding ---
-    onehot_cols = ["race", "employment_status", "census_msa", "hhs_geo_region"]
-    df_encoded = pd.get_dummies(df_encoded, 
-                                columns=[col for col in onehot_cols if col in df_encoded.columns],
-                                drop_first=True)
+    onehot_cols = [
+        "sex", "marital_status", "rent_or_own", "health_insurance",
+        "race", "employment_status", "census_msa", "hhs_geo_region"
+    ]
+    train_encoded = pd.get_dummies(train_encoded, columns=[c for c in onehot_cols if c in train_encoded.columns], drop_first=True)
+    test_encoded  = pd.get_dummies(test_encoded, columns=[c for c in onehot_cols if c in test_encoded.columns], drop_first=True)
 
-    # --- Frequency encoding for high-cardinality ---
+    # --- Align train/test columns ---
+    train_encoded, test_encoded = train_encoded.align(test_encoded, join="left", axis=1, fill_value=0)
+
+    # --- Target encoding for high-cardinality ---
     for col in ["employment_industry", "employment_occupation"]:
-        if col in df_encoded.columns:
-            freqs = df_encoded[col].value_counts(normalize=True)
-            df_encoded[col] = df_encoded[col].map(freqs)
+        if col in train_df.columns:
+            for target in ["h1n1_vaccine", "seasonal_vaccine"]:
+                train_te, test_te = target_encode(train_df, test_df, col=col, target=target)
+                train_encoded[f"{col}_te_{target}"] = train_te
+                test_encoded[f"{col}_te_{target}"] = test_te
 
-    return df_encoded
+            # Drop raw categorical column after encoding
+            train_encoded.drop(columns=[col], inplace=True)
+            test_encoded.drop(columns=[col], inplace=True)
+
+    return train_encoded, test_encoded
