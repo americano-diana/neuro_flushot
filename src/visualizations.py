@@ -14,6 +14,14 @@ def plot_rates(data, target, categorical_vars, n_cols):
     Creates stacked barplots of H1N1 and seasonal vaccination rates
     for each categorical variable in `categorical_vars`.
     """
+    custom_orders = {
+        'age_group': ['18 - 34 Years', '35 - 44 Years', '45 - 54 Years', '55 - 64 Years', '65+ Years'],
+        'education': ['< 12 Years', '12 Years', 'Some College', 'College Graduate'],
+        'income_poverty': ['Below Poverty', '<= $75,000, Above Poverty', '> $75,000'],
+        'household_adults': [0.0, 1.0, 2.0, 3.0],
+        'household_children': [0.0, 1.0, 2.0, 3.0],
+    }
+    
     n_vars = len(categorical_vars)
     nrows = int(np.ceil(n_vars / n_cols))
 
@@ -24,30 +32,38 @@ def plot_rates(data, target, categorical_vars, n_cols):
         ax = axes[i]
 
         # Aggregate statistics
-        demo_stats = data.groupby(var).agg({
+        stats = data.groupby(var).agg({
             'h1n1_vaccine': ['mean', 'count'],
             'seasonal_vaccine': 'mean'
         }).round(4)
-        demo_stats.columns = ['h1n1_rate', 'count', 'seasonal_rate']
-        demo_stats = demo_stats[demo_stats['count'] > 50]  # filter small groups
-        demo_stats = demo_stats.sort_values('h1n1_rate', ascending=True)
-        demo_stats['h1n1_rate'] *= 100
-        demo_stats['seasonal_rate'] *= 100
+        stats.columns = ['h1n1_rate', 'count', 'seasonal_rate']
+        stats = stats[stats['count'] > 50]  # filter small groups
+
+        # Apply custom sorting if available, otherwise sort by h1n1_rate
+        if var in custom_orders:
+            # Filter to only include categories that exist in the data
+            order = [cat for cat in custom_orders[var] if cat in stats.index]
+            stats = stats.reindex(order)
+        else:
+            stats = stats.sort_values('h1n1_rate', ascending=True)
+        
+        stats['h1n1_rate'] *= 100
+        stats['seasonal_rate'] *= 100
 
         # Stacked bar chart
-        y_pos = np.arange(len(demo_stats))
-        ax.barh(y_pos, demo_stats['h1n1_rate'], color='#FF6B6B', alpha=0.8, label='H1N1')
-        ax.barh(y_pos, demo_stats['seasonal_rate'], 
-                left=demo_stats['h1n1_rate'], color='#4ECDC4', alpha=0.8, label='Seasonal')
+        y_pos = np.arange(len(stats))
+        ax.barh(y_pos, stats['h1n1_rate'], color='#FF6B6B', alpha=0.8, label='H1N1')
+        ax.barh(y_pos, stats['seasonal_rate'], 
+                left=stats['h1n1_rate'], color='#4ECDC4', alpha=0.8, label='Seasonal')
 
         ax.set_yticks(y_pos)
-        ax.set_yticklabels(demo_stats.index, fontsize=9)
+        ax.set_yticklabels(stats.index, fontsize=9)
         ax.set_xlabel('Vaccination Rate (%)', fontsize=10, fontweight='bold')
         ax.set_title(title, fontsize=12, fontweight='bold')
         ax.grid(axis='x', alpha=0.3)
 
         # Optional: add value labels
-        for j, (h1n1, seasonal) in enumerate(zip(demo_stats['h1n1_rate'], demo_stats['seasonal_rate'])):
+        for j, (h1n1, seasonal) in enumerate(zip(stats['h1n1_rate'], stats['seasonal_rate'])):
             ax.text(h1n1 / 2, j, f'{h1n1:.1f}%', color='white', ha='center', va='center', fontsize=8)
             ax.text(h1n1 + seasonal / 2, j, f'{seasonal:.1f}%', color='white', ha='center', va='center', fontsize=8)
 
@@ -97,6 +113,7 @@ def plot_heatmap(data, target, categorical_vars, n_cols):
 
 # Helper: Cramér’s V (effect size for categorical associations)
 def cramers_v(confusion_matrix):
+    """Compute Cramér’s V for categorical association strength"""
     chi2 = chi2_contingency(confusion_matrix)[0]
     n = confusion_matrix.sum().sum()
     phi2 = chi2 / n
@@ -113,7 +130,7 @@ def analyse_test(data, target, categorical_vars, tests=['chi2'], alpha=0.05, vis
 
     Parameters:
         data (pd.DataFrame): dataset with categorical vars + vaccination flags
-        target: String of target variable
+        target: String of target variable 
         categorical_vars (dict or list): variables to test
         tests (list): any combination of ['chi2', 'cramers_v', 'anova', 'kruskal']
         alpha (float): significance threshold
@@ -210,19 +227,23 @@ def analyse_test(data, target, categorical_vars, tests=['chi2'], alpha=0.05, vis
         )
 
         fig, axes = plt.subplots(1, 2, figsize=(14, max(5, len(categorical_vars) * 0.5)))
-        # --- Left: significance (–log10 p) ---
+
+        # --- Left: significance (–log10 p) with capped color scale ---
         sns.heatmap(plot_df, annot=True, fmt=".2f", cmap="Reds",
+                    vmin=0, vmax=50,
                     cbar_kws={'label': '–log₁₀(p)'}, ax=axes[0])
-        axes[0].set_title('Significance of Association (–log₁₀ p)', fontsize=12, fontweight='bold')
+        axes[0].set_title('Significance of Association', fontsize=12, fontweight='bold')
         axes[0].set_ylabel('')
         axes[0].set_xlabel('Vaccine Type')
 
-        # --- Right: effect size (Cramér’s V) ---
+        # --- Right: effect size (Cramér's V) ---
         sns.heatmap(effect_df, annot=True, fmt=".2f", cmap="Blues",
-                    cbar_kws={'label': "Cramér’s V"}, ax=axes[1])
-        axes[1].set_title('Effect Size (Cramér’s V)', fontsize=12, fontweight='bold')
+                    vmin=0, vmax=0.5,
+                    cbar_kws={'label': "Cramér's V"}, ax=axes[1])
+        axes[1].set_title('Effect Size', fontsize=12, fontweight='bold')
         axes[1].set_ylabel('')
         axes[1].set_xlabel('Vaccine Type')
+
 
         plt.suptitle(f'Statistical Tests: {target} Effects on Vaccination Rates',
                      fontsize=14, fontweight='bold')
@@ -230,4 +251,80 @@ def analyse_test(data, target, categorical_vars, tests=['chi2'], alpha=0.05, vis
         plt.show()
 
     print(f"\n {target} analysis complete. Summary table returned.\n")
+    return results_df
+
+def analyse_and_rank(data, targets=['h1n1_vaccine', 'seasonal_vaccine'], alpha=0.05, visualize=True):
+    """
+    Run statistical significance tests for *all* features vs. both vaccine targets.
+    Automatically selects appropriate tests for each variable type.
+
+    Returns a ranked DataFrame by p-value or effect size.
+    """
+
+    results = []
+
+    for var in data.columns:
+        if data[var].nunique() < 2:
+            continue  # skip constant columns
+
+        for vaccine in targets:
+            target = data[vaccine]
+
+            # Categorical features → Chi-square + Cramér’s V
+            if not pd.api.types.is_numeric_dtype(data[var]) or data[var].nunique() <= 10:
+                contingency = pd.crosstab(data[var], target)
+                if contingency.shape[0] < 2 or contingency.shape[1] < 2:
+                    continue
+                chi2, p, dof, expected = chi2_contingency(contingency)
+                effect = cramers_v(contingency)
+
+                results.append({
+                    'Feature': var,
+                    'Vaccine': vaccine,
+                    'Test': 'Chi-square',
+                    'Statistic': chi2,
+                    'p_value': p,
+                    'Effect_Size': effect
+                })
+
+            # Continuous or ordinal features → ANOVA/Kruskal
+            else:
+                groups = [data.loc[target == t, var] for t in target.unique() if len(data.loc[target == t, var]) > 1]
+                if len(groups) < 2:
+                    continue
+                f_stat, p = f_oneway(*groups)
+                results.append({
+                    'Feature': var,
+                    'Vaccine': vaccine,
+                    'Test': 'ANOVA',
+                    'Statistic': f_stat,
+                    'p_value': p,
+                    'Effect_Size': np.nan
+                })
+
+    results_df = pd.DataFrame(results)
+
+    if results_df.empty:
+        print("No valid results found. Check dataset or target names.")
+        return pd.DataFrame()
+
+    # Rank features by significance (lower p-value → higher rank)
+    results_df['Rank'] = results_df.groupby('Vaccine')['p_value'].rank(method='dense', ascending=True)
+
+    # Add significance flag
+    results_df['Significant'] = results_df['p_value'] < alpha
+
+    # Sort
+    results_df = results_df.sort_values(['Vaccine', 'p_value'])
+
+    # Optional visualization
+    if visualize:
+        plt.figure(figsize=(10, max(6, len(results_df['Feature'].unique()) * 0.25)))
+        sns.barplot(data=results_df, y='Feature', x='-log10(p)', hue='Vaccine',
+                    orient='h', palette='Set2')
+        plt.title('Top Features by Statistical Significance')
+        plt.xlabel('-log10(p-value)')
+        plt.tight_layout()
+        plt.show()
+
     return results_df
