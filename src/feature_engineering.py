@@ -40,7 +40,6 @@ def add_behavioral_features(df: pd.DataFrame) -> pd.DataFrame:
     df["HKI"] = (df["h1n1_concern"] + df["h1n1_knowledge"]) / 2
 
     df["doctor_any"] = ((df["doctor_recc_h1n1"] == 1) | (df["doctor_recc_seasonal"] == 1)).astype(int)
-    df["doctor_gap"] = ((df["doctor_recc_h1n1"] == 0) & (df["doctor_recc_seasonal"] == 0)).astype(int)
 
     return df
 
@@ -128,7 +127,7 @@ def validate_engineered_features(df: pd.DataFrame) -> None:
     """
     expected_features = [
         "PBI", "PVAS_h1n1", "PVAS_seas", "HKI",
-        "doctor_any", "doctor_gap", "below_poverty", "low_edu",
+        "doctor_any", "below_poverty", "low_edu",
         "housing_insecure", "no_job", "no_insurance", "is_married",
         "is_senior", "HRI", "PVASxPBI_h1n1", "PVASxDoctor_seas",
         "PBIxNoInsur", "SeniorxChronic"
