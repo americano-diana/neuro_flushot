@@ -146,20 +146,3 @@ def validate_engineered_features(df: pd.DataFrame) -> None:
     assert df["PBI"].between(0, 1).all(), "PBI out of expected range [0,1]"
     assert df["HRI"].between(0, 4).all(), "HRI out of expected range [0,4]"
     print("Feature validation passed: all checks OK.")
-
-
-# =========================================================
-# CLI USAGE EXAMPLE (optional)
-# =========================================================
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 3:
-        print("Usage: python src/feature_engineering.py <train_encoded.csv> <output_train_fe.csv>")
-        sys.exit(1)
-
-    train_path, output_path = sys.argv[1], sys.argv[2]
-    df = pd.read_csv(train_path)
-    df_fe = engineer_all_features(df)
-    validate_engineered_features(df_fe)
-    df_fe.to_csv(output_path, index=False)
-    print(f"Saved enhanced dataset to {output_path}")
