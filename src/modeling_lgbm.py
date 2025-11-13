@@ -171,8 +171,11 @@ def lgbm_cv(X: pd.DataFrame, y: pd.Series, label_name: str, params: Dict | None 
 # ----------------------------
 # Fine-tuning with RandomizedSearchCV
 # ----------------------------
-def tune_lgbm_model(X: pd.DataFrame, y: pd.Series, target: str, n_iter: int = 30, cv: int = 5, random_state: int = 42):
-    """Fine-tune LightGBM using RandomizedSearchCV to maximize F1-score."""
+from joblib import dump
+
+def tune_lgbm_model(X: pd.DataFrame, y: pd.Series, target: str,
+                    n_iter: int = 30, cv: int = 5, random_state: int = 42):
+
     print(f"\n=== Fine-tuning {target} model ===")
     spw = (y == 0).sum() / (y == 1).sum() if target == "h1n1_vaccine" else 1.0
     print(f"Applying scale_pos_weight={spw:.2f} for {target}")
@@ -210,17 +213,20 @@ def tune_lgbm_model(X: pd.DataFrame, y: pd.Series, target: str, n_iter: int = 30
     )
 
     searcher.fit(X, y)
-    print(f"Best params for {target}: {searcher.best_params_}")
-    print(f"Best F1-score (CV): {searcher.best_score_:.4f}")
-
     best_model = searcher.best_estimator_
+
+    # ---------------------------------------------------------------
+    # SAVE THE MODEL AFTER best_model IS CREATED
+    # ---------------------------------------------------------------
+    model_path = Path("artifacts_lgbm") / f"{target}_tuned_model.pkl"
+    dump(best_model, model_path)
+    print(f"Saved tuned model for {target} → {model_path}")
+    # ---------------------------------------------------------------
+
     y_pred = best_model.predict(X)
     y_prob = best_model.predict_proba(X)[:, 1]
 
     metrics = compute_metrics(y, y_pred, y_prob)
-    print("\nFine-tuned metrics:")
-    for k, v in metrics.items():
-        print(f"{k:10s}: {v:.3f}")
 
     create_confusion_matrices(y, y_pred, f"{target}_tuned", "artifacts_lgbm")
 
