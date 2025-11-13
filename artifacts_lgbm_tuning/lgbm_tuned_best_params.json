@@ -1,0 +1,41 @@
+{
+  "h1n1_vaccine": {
+    "params": {
+      "reg_lambda": 0.0,
+      "reg_alpha": 0.0,
+      "num_leaves": 63,
+      "min_child_samples": 50,
+      "max_depth": 6,
+      "learning_rate": 0.01,
+      "feature_fraction": 0.8,
+      "bagging_fraction": 0.8
+    },
+    "metrics_mean": {
+      "accuracy": 0.8352868056362166,
+      "precision": 0.6064964926263499,
+      "recall": 0.6439907077205168,
+      "f1": 0.624002767147427,
+      "roc_auc": 0.8613053604852595
+    }
+  },
+  "seasonal_vaccine": {
+    "params": {
+      "reg_lambda": 0.0,
+      "reg_alpha": 0.0,
+      "num_leaves": 15,
+      "min_child_samples": 100,
+      "max_depth": 8,
+      "learning_rate": 0.005,
+      "feature_fraction": 0.7,
+      "bagging_fraction": 0.9
+    },
+    "metrics_mean": {
+      "accuracy": 0.7866103651590506,
+      "precision": 0.7777542885993325,
+      "recall": 0.7586650583031764,
+      "f1": 0.768033481784722,
+      "roc_auc": 0.8624247471259563
+    }
+  },
+  "macro_f1": 0.6960181244660745
+}
