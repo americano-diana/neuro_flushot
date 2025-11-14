@@ -1,18 +1,15 @@
 """
-LightGBM modeling for FluShotML project
----------------------------------------
-Trains, evaluates, and fine-tunes LightGBM models for multi-label vaccination prediction.
-
-Includes:
-- Cross-validated LightGBM baseline
-- RandomizedSearchCV fine-tuning (F1 optimization)
-- Confusion matrices (raw + normalized)
-- scale_pos_weight applied only to H1N1 model
+LightGBM modeling for FluShotML
+Fixed version addressing:
+- Train/validation split for proper evaluation
+- Consistent model saving/loading
+- No data leakage
+- Proper artifact management
 """
 
 from __future__ import annotations
-import re
 import json
+import re
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -20,177 +17,149 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from lightgbm import LGBMClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    confusion_matrix,
-)
-from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
 from scipy.stats import uniform, randint
+from sklearn.metrics import (
+    precision_score, recall_score, f1_score, roc_auc_score,
+    accuracy_score, confusion_matrix
+)
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
+from joblib import dump, load
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-import warnings
 
-warnings.filterwarnings("ignore")
-
-# ----------------------------
-# Globals
-# ----------------------------
+# Targets
 TARGET_COLS = ["h1n1_vaccine", "seasonal_vaccine"]
 
+# -------------------------------------------------------------------
+# Utility functions
+# -------------------------------------------------------------------
 
-# ----------------------------
-# Utilities
-# ----------------------------
 def clean_feature_names(df: pd.DataFrame) -> pd.DataFrame:
-    cleaned = []
-    for c in df.columns:
-        new_c = re.sub(r"[^A-Za-z0-9_]", "_", c)
-        new_c = re.sub(r"_+", "_", new_c).strip("_")
-        cleaned.append(new_c)
-    df.columns = cleaned
+    df.columns = [
+        re.sub(r"_+", "_",
+               re.sub(r"[^A-Za-z0-9_]", "_", c)
+               ).strip("_")
+        for c in df.columns
+    ]
     return df
 
 
-def load_data(train_features_path: str, test_features_path: str, train_labels_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_training_data(train_features_path, train_labels_path):
     X = pd.read_csv(train_features_path)
     y = pd.read_csv(train_labels_path)[TARGET_COLS].astype(int)
-    X = X.drop(columns=[c for c in ["Unnamed: 0", "Unnamed_0", "respondent_id"] if c in X.columns])
+
+    X = X.drop(columns=["respondent_id", "Unnamed: 0", "Unnamed_0"], errors="ignore")
     X = clean_feature_names(X)
+
     return X, y
 
 
-def compute_metrics(y_true, y_pred, y_proba) -> Dict[str, float]:
+def compute_metrics(y_true, y_pred, y_prob):
     return {
-        "accuracy": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-        "roc_auc": roc_auc_score(y_true, y_proba),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "roc_auc": float(roc_auc_score(y_true, y_prob)),
     }
 
 
-# ----------------------------
-# Confusion Matrices
-# ----------------------------
-def create_confusion_matrices(y_true: np.ndarray, y_pred: np.ndarray, label_name: str, out_dir: str):
-    """Generate and save raw and normalized confusion matrix heatmaps."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def save_confusion_matrices(y_true, y_pred, label, outdir):
+    outdir = Path(outdir)
+    outdir.mkdir(exist_ok=True, parents=True)
 
-    # Raw confusion matrix
+    # Raw
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(4, 3))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
-    plt.title(f"Confusion Matrix: {label_name}")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+    plt.title(f"{label} – Confusion Matrix")
     plt.tight_layout()
-    raw_path = out_dir / f"confusion_matrix_{label_name}.png"
-    plt.savefig(raw_path)
+    plt.savefig(outdir / f"{label}_cm.png")
     plt.close()
 
-    # Normalized confusion matrix
-    cm_norm = confusion_matrix(y_true, y_pred, normalize="true")
+    # Normalized
+    cmn = confusion_matrix(y_true, y_pred, normalize="true")
     plt.figure(figsize=(4, 3))
-    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Greens", cbar=True)
-    plt.title(f"Normalized Confusion Matrix: {label_name}")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
+    sns.heatmap(cmn, annot=True, fmt=".2f", cmap="Greens")
+    plt.title(f"{label} – Confusion Matrix (Normalized)")
     plt.tight_layout()
-    norm_path = out_dir / f"confusion_matrix_{label_name}_normalized.png"
-    plt.savefig(norm_path)
+    plt.savefig(outdir / f"{label}_cm_normalized.png")
     plt.close()
 
-    print(f"Saved confusion matrices for {label_name}:")
-    print(f"  Raw        → {raw_path}")
-    print(f"  Normalized → {norm_path}")
 
+# -------------------------------------------------------------------
+# 1. BASELINE TRAINING (with train/val split)
+# -------------------------------------------------------------------
 
-# ----------------------------
-# Baseline LightGBM CV
-# ----------------------------
-def lgbm_cv(X: pd.DataFrame, y: pd.Series, label_name: str, params: Dict | None = None, n_splits: int = 5, seed: int = 42) -> Dict[str, float]:
-    if params is None:
-        params = {
-            "objective": "binary",
-            "metric": "auc",
-            "boosting_type": "gbdt",
-            "learning_rate": 0.03,
-            "num_leaves": 31,
-            "max_depth": 6,
-            "feature_fraction": 0.8,
-            "bagging_fraction": 0.8,
-            "bagging_freq": 3,
-            "lambda_l1": 0.5,
-            "lambda_l2": 0.5,
-            "verbose": -1,
-            "verbosity": -1,
-            "force_col_wise": True,
-            "seed": seed,
-        }
+def train_baseline_models(train_features, train_labels, outdir="artifacts_lgbm", random_state=42):
+    Path(outdir).mkdir(exist_ok=True, parents=True)
+    X, y = load_training_data(train_features, train_labels)
+    
+    # Split data for validation
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=random_state, stratify=y["h1n1_vaccine"]
+    )
 
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    all_metrics, y_true_all, y_pred_all = [], [], []
+    baseline_results = {}
 
-    for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), start=1):
-        print(f"Running fold {fold}/{n_splits} for {label_name}...")
-        X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-        y_tr, y_va = y.iloc[tr_idx], y.iloc[va_idx]
-
-        dtrain = lgb.Dataset(X_tr, label=y_tr)
-        dval = lgb.Dataset(X_va, label=y_va)
-
-        model = lgb.train(
-            params,
-            dtrain,
-            valid_sets=[dval],
-            num_boost_round=1000,
-            callbacks=[
-                lgb.early_stopping(stopping_rounds=50, verbose=False),
-                lgb.log_evaluation(period=0),
-            ],
+    for target in TARGET_COLS:
+        model = LGBMClassifier(
+            objective="binary",
+            boosting_type="gbdt",
+            learning_rate=0.03,
+            n_estimators=300,
+            verbose=-1,
+            random_state=random_state
         )
+        model.fit(X_train, y_train[target])
 
-        y_prob = model.predict(X_va, num_iteration=model.best_iteration)
-        y_pred = (y_prob >= 0.5).astype(int)
-        y_true_all.extend(y_va)
-        y_pred_all.extend(y_pred)
-        all_metrics.append(compute_metrics(y_va, y_pred, y_prob))
+        # Evaluate on validation set
+        y_prob_val = model.predict_proba(X_val)[:, 1]
+        y_pred_val = (y_prob_val >= 0.5).astype(int)
 
-    avg_metrics = {k: float(np.mean([m[k] for m in all_metrics])) for k in all_metrics[0]}
-    avg_metrics["y_true_all"] = y_true_all
-    avg_metrics["y_pred_all"] = y_pred_all
-    print(f"{label_name} CV results: " + ", ".join([f"{k}={v:.3f}" for k, v in avg_metrics.items() if k not in ['y_true_all', 'y_pred_all']]))
-    return avg_metrics
+        metrics = compute_metrics(y_val[target], y_pred_val, y_prob_val)
+
+        save_confusion_matrices(y_val[target], y_pred_val, f"baseline_{target}", outdir)
+
+        # Save model
+        dump(model, Path(outdir) / f"baseline_{target}_model.pkl")
+
+        with open(Path(outdir) / f"baseline_{target}_metrics.json", "w") as f:
+            json.dump(metrics, f, indent=2)
+
+        baseline_results[target] = metrics
+
+    with open(Path(outdir) / "baseline_results.json", "w") as f:
+        json.dump(baseline_results, f, indent=2)
+
+    return baseline_results
 
 
-# ----------------------------
-# Fine-tuning with RandomizedSearchCV
-# ----------------------------
-from joblib import dump
+# -------------------------------------------------------------------
+# 2. FINE-TUNING (with proper CV - no data leakage)
+# -------------------------------------------------------------------
 
-def tune_lgbm_model(X: pd.DataFrame, y: pd.Series, target: str,
-                    n_iter: int = 30, cv: int = 5, random_state: int = 42):
+def tune_model(X, y, target, outdir="artifacts_lgbm", random_state=42):
+    """
+    Fine-tune model using cross-validation.
+    Metrics are computed from CV, not on training data.
+    """
+    Path(outdir).mkdir(parents=True, exist_ok=True)
 
-    print(f"\n=== Fine-tuning {target} model ===")
     spw = (y == 0).sum() / (y == 1).sum() if target == "h1n1_vaccine" else 1.0
-    print(f"Applying scale_pos_weight={spw:.2f} for {target}")
 
     base_model = LGBMClassifier(
         objective="binary",
         boosting_type="gbdt",
-        n_estimators=500,
         learning_rate=0.03,
-        random_state=random_state,
+        n_estimators=500,
         scale_pos_weight=spw,
         verbose=-1,
+        random_state=random_state
     )
 
-    param_distributions = {
+    param_dist = {
         "num_leaves": randint(20, 80),
         "max_depth": randint(3, 12),
         "feature_fraction": uniform(0.6, 0.4),
@@ -201,72 +170,136 @@ def tune_lgbm_model(X: pd.DataFrame, y: pd.Series, target: str,
         "min_child_samples": randint(10, 100),
     }
 
-    searcher = RandomizedSearchCV(
+    search = RandomizedSearchCV(
         base_model,
-        param_distributions=param_distributions,
-        n_iter=n_iter,
+        param_distributions=param_dist,
+        n_iter=30,
         scoring="f1",
-        cv=cv,
-        n_jobs=-1,
-        verbose=0,
+        cv=5,
         random_state=random_state,
+        verbose=0,
+        n_jobs=-1
     )
 
-    searcher.fit(X, y)
-    best_model = searcher.best_estimator_
+    search.fit(X, y)
 
-    # ---------------------------------------------------------------
-    # SAVE THE MODEL AFTER best_model IS CREATED
-    # ---------------------------------------------------------------
-    model_path = Path("artifacts_lgbm") / f"{target}_tuned_model.pkl"
-    dump(best_model, model_path)
-    print(f"Saved tuned model for {target} → {model_path}")
-    # ---------------------------------------------------------------
+    best_params = search.best_params_
+    best_model = search.best_estimator_
+    
+    # Get CV score (no data leakage)
+    cv_score = search.best_score_
 
-    y_pred = best_model.predict(X)
-    y_prob = best_model.predict_proba(X)[:, 1]
+    # Save params
+    with open(Path(outdir) / f"{target}_best_params.json", "w") as f:
+        json.dump(best_params, f, indent=2)
 
-    metrics = compute_metrics(y, y_pred, y_prob)
+    # Save model
+    dump(best_model, Path(outdir) / f"{target}_tuned_model.pkl")
 
-    create_confusion_matrices(y, y_pred, f"{target}_tuned", "artifacts_lgbm")
+    # Create a validation split for detailed metrics
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=random_state
+    )
+    
+    # Retrain on train split and evaluate on validation
+    best_model.fit(X_train, y_train)
+    y_prob_val = best_model.predict_proba(X_val)[:, 1]
+    y_pred_val = (y_prob_val >= 0.5).astype(int)
+    metrics = compute_metrics(y_val, y_pred_val, y_prob_val)
+    metrics["cv_f1_score"] = float(cv_score)
 
-    return {
-        "best_model": best_model,
-        "best_params": searcher.best_params_,
-        "cv_f1": searcher.best_score_,
-        "metrics": metrics,
-    }
+    save_confusion_matrices(y_val, y_pred_val, f"tuned_{target}", outdir)
+
+    with open(Path(outdir) / f"tuned_{target}_metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    return best_params, metrics
 
 
-# ----------------------------
-# Run for both labels
-# ----------------------------
-def run_lgbm_models(
-    train_features_path: str = "data/processed/training_fe_full.csv",
-    test_features_path: str = "data/processed/test_fe_full.csv",
-    train_labels_path: str = "data/raw/training_set_labels.csv",
-    n_splits: int = 5,
-    out_dir: str = "artifacts_lgbm",
-) -> Dict[str, Dict]:
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    X, y = load_data(train_features_path, test_features_path, train_labels_path)
+# -------------------------------------------------------------------
+# 3. RETRAIN FINAL MODEL WITH TUNED PARAMS (on full dataset)
+# -------------------------------------------------------------------
 
-    results = {}
-    for label in TARGET_COLS:
-        print(f"\n=== Training model for {label} ===")
-        res = lgbm_cv(X, y[label], label_name=label, n_splits=n_splits)
-        create_confusion_matrices(np.array(res["y_true_all"]), np.array(res["y_pred_all"]), label_name=label, out_dir=out_dir)
-        del res["y_true_all"], res["y_pred_all"]
-        results[label] = res
+def train_final_model(X, y, target, best_params, outdir="artifacts_lgbm", random_state=42):
+    """
+    Train final model on full dataset using best parameters.
+    """
+    Path(outdir).mkdir(parents=True, exist_ok=True)
 
-    macro_f1 = float(np.mean([results[t]["f1"] for t in TARGET_COLS]))
-    results["macro_f1"] = macro_f1
+    final_model = LGBMClassifier(
+        objective="binary",
+        boosting_type="gbdt",
+        learning_rate=0.03,
+        n_estimators=500,
+        verbose=-1,
+        random_state=random_state,
+        **best_params
+    )
 
-    with open(Path(out_dir) / "lgbm_cv_results.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
+    final_model.fit(X, y)
 
-    print("\n=== Summary (Macro F1) ===")
-    for t in TARGET_COLS:
-        print(f"{t:20s}: {results[t]['f1']:.3f}")
-    print(f"Overall macro F1: {macro_f1:.3f}")
-    return results
+    dump(final_model, Path(outdir) / f"{target}_final_model.pkl")
+
+    print(f"✓ Final model for {target} saved")
+    return final_model
+
+
+# -------------------------------------------------------------------
+# 4. PREDICT TEST SET
+# -------------------------------------------------------------------
+
+def load_final_models(model_dir="artifacts_lgbm"):
+    """
+    Load final models saved with joblib.
+    """
+    models = {}
+    for target in TARGET_COLS:
+        model_path = Path(model_dir) / f"{target}_final_model.pkl"
+        models[target] = load(model_path)
+    return models
+
+
+def predict_test(models: dict, test_features_path: str) -> pd.DataFrame:
+    """
+    Make predictions on test set.
+    
+    Args:
+        models: dict of {target: LGBMClassifier}
+        test_features_path: path to test CSV
+    
+    Returns:
+        DataFrame with respondent_id and probability predictions
+    """
+    df = pd.read_csv(test_features_path)
+
+    # Extract IDs
+    ids = df["respondent_id"].copy()
+
+    # Drop the same columns dropped during training
+    drop_cols = ["respondent_id", "Unnamed: 0", "Unnamed_0"]
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+
+    # Clean feature names exactly as in training
+    X = clean_feature_names(df)
+
+    # Ensure train–test column consistency
+    # Get feature names from one of the models
+    feature_order = models["h1n1_vaccine"].feature_names_in_
+
+    # Align columns
+    missing_cols = set(feature_order) - set(X.columns)
+    if missing_cols:
+        print(f"Warning: Test data missing features: {missing_cols}")
+        for col in missing_cols:
+            X[col] = 0  # Add missing columns with default value
+    
+    X = X[feature_order]  # Reorder to match training
+
+    preds = {"respondent_id": ids}
+
+    for target in TARGET_COLS:
+        model = models[target]
+        prob = model.predict_proba(X)[:, 1]
+        preds[target] = prob
+
+    return pd.DataFrame(preds)
